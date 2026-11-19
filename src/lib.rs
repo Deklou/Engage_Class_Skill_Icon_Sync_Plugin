@@ -20,6 +20,16 @@ struct SpriteGlyph {}
 #[unity::class("TMPro", "TMP_SpriteCharacter")]
 struct SpriteCharacter {}
 
+// La structure UnityEngine.Rect contient quatre flottants (x, y, largeur, hauteur).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SpriteRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
 // Offsets et structures du jeu 2.0.0 (Ghidra main_200).
 const PREFIX: &str = "ClassSkillIconSync_";
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
@@ -34,6 +44,8 @@ fn get_icon_label(skill: *const SkillData, method: OptionalMethod) -> *const Il2
 fn get_skill_icon(label: *const Il2CppString, method: OptionalMethod) -> *mut Sprite;
 #[skyline::from_offset(0x02F97670)]
 fn sprite_texture(sprite: *const Sprite, method: OptionalMethod) -> *mut Texture;
+#[skyline::from_offset(0x02F979A0)]
+fn sprite_texture_rect(sprite: *const Sprite, method: OptionalMethod) -> SpriteRect;
 #[skyline::from_offset(0x037894F0)]
 fn texture_width(texture: *const Texture, method: OptionalMethod) -> i32;
 #[skyline::from_offset(0x03789580)]
@@ -59,6 +71,8 @@ fn original_asset_callback(arg: i32, asset_name: *const Il2CppString, method: Op
 
 #[skyline::from_offset(0x02D8DAE0)]
 fn register_sprite_asset(hash: i32, asset: *mut SpriteAsset, method: OptionalMethod);
+#[skyline::from_offset(0x02E66750)]
+fn text_hash(name: *const Il2CppString, method: OptionalMethod) -> i32;
 
 // Les offsets de champs incluent l'en-tête IL2CPP de 0x10 octets.
 unsafe fn field<T: Copy>(ptr: *const u8, offset: usize) -> T {
@@ -68,8 +82,10 @@ unsafe fn set_field<T>(ptr: *mut u8, offset: usize, value: T) {
     (ptr.add(offset) as *mut T).write(value);
 }
 
-unsafe fn build_asset(name: &str, label: &Il2CppString, sprite: *mut Sprite, texture: *mut Texture, id: u32)
-    -> Option<(*mut SpriteAsset, u32)> {
+unsafe fn build_asset(
+    name: &str, label: &Il2CppString, sprite: *mut Sprite, texture: *mut Texture,
+    rect: SpriteRect, id: u32,
+) -> Option<(*mut SpriteAsset, u32)> {
     let stock = original_asset_callback(0, Il2CppString::new("Skill"), None);
     if stock.is_null() { return None; }
     let stock_material: *mut Material = field(stock.cast(), 0x20);
@@ -94,10 +110,20 @@ unsafe fn build_asset(name: &str, label: &Il2CppString, sprite: *mut Sprite, tex
     sprite_glyph_ctor(glyph, None);
     let p = (glyph as *mut SpriteGlyph).cast::<u8>();
     set_field(p, 0x10, 0_u32);
-    for (offset, value) in [(0x14, 56.0_f32), (0x18, 56.0), (0x1C, 0.0), (0x20, 56.0), (0x24, 56.0)] {
+    // Les coordonnées du rectangle sont exprimées dans la texture source :
+    // (0, 0, 56, 56) pour un PNG Cobalt, une sous-région pour un atlas vanilla.
+    for (offset, value) in [
+        (0x14, rect.width), (0x18, rect.height), (0x1C, 0.0),
+        (0x20, rect.height), (0x24, rect.width),
+    ] {
         set_field(p, offset, value);
     }
-    for (offset, value) in [(0x28, 0_i32), (0x2C, 0), (0x30, 56), (0x34, 56)] {
+    for (offset, value) in [
+        (0x28, rect.x.round() as i32),
+        (0x2C, rect.y.round() as i32),
+        (0x30, rect.width.round() as i32),
+        (0x34, rect.height.round() as i32),
+    ] {
         set_field(p, offset, value);
     }
     set_field(p, 0x38, 1.0_f32);
@@ -114,18 +140,25 @@ unsafe fn build_asset(name: &str, label: &Il2CppString, sprite: *mut Sprite, tex
     (*char_list).add(character);
     update_lookup_tables(asset, None);
 
-    // Enregistrement natif : la collection TMP conserve l'asset et son matériau en mémoire.
-    let hash = 0x4000_0000_i32 + id as i32;
+    // Enregistre sous le véritable hash du nom attendu par TextMeshPro.
+    let hash = text_hash(Il2CppString::new(name), None);
     register_sprite_asset(hash, asset, None);
     Some((asset, id))
 }
 
 #[skyline::hook(offset = 0x025DA3D0)]
 fn create_skill_sprite_tag(skill: *const SkillData, method: OptionalMethod) -> *const Il2CppString {
-    if skill.is_null() { return call_original!(skill, method); }
+    if skill.is_null() {
+        println!("[class_skill_icon_sync] CreateSkillSpriteTag : skill nul");
+        return call_original!(skill, method);
+    }
     let label = unsafe { get_icon_label(skill, None) };
-    if label.is_null() { return call_original!(skill, method); }
+    if label.is_null() {
+        println!("[class_skill_icon_sync] CreateSkillSpriteTag : IconLabel nul");
+        return call_original!(skill, method);
+    }
     let label_text = unsafe { (*label).to_string() };
+    println!("[class_skill_icon_sync] CreateSkillSpriteTag : {label_text}");
     if label_text.is_empty() { return call_original!(skill, method); }
 
     if let Some((name, _, _)) = assets().lock().unwrap().get(&label_text) {
@@ -133,19 +166,39 @@ fn create_skill_sprite_tag(skill: *const SkillData, method: OptionalMethod) -> *
     }
 
     let sprite = unsafe { get_skill_icon(label, None) };
-    if sprite.is_null() { return call_original!(skill, method); }
+    if sprite.is_null() {
+        println!("[class_skill_icon_sync] Sprite introuvable : {label_text}");
+        return call_original!(skill, method);
+    }
     let texture = unsafe { sprite_texture(sprite, None) };
-    // Les PNG Cobalt sont des textures autonomes de 56x56, contrairement à l'atlas vanilla.
-    if texture.is_null()
-        || unsafe { texture_width(texture, None) } != 56
-        || unsafe { texture_height(texture, None) } != 56
+    if texture.is_null() {
+        println!("[class_skill_icon_sync] Texture absente : {label_text}");
+        return call_original!(skill, method);
+    }
+    let w = unsafe { texture_width(texture, None) };
+    let h = unsafe { texture_height(texture, None) };
+    let rect = unsafe { sprite_texture_rect(sprite, None) };
+    println!(
+        "[class_skill_icon_sync] Source {label_text} : texture {w}x{h}, rect ({}, {}, {}, {})",
+        rect.x, rect.y, rect.width, rect.height
+    );
+
+    // Un sprite vanilla peut venir d'un grand atlas. Le rectangle identifie
+    // uniquement ses pixels, sans copier ni modifier le sprite du jeu.
+    if !rect.x.is_finite() || !rect.y.is_finite()
+        || !rect.width.is_finite() || !rect.height.is_finite()
+        || rect.x < 0.0 || rect.y < 0.0
+        || rect.width <= 0.0 || rect.height <= 0.0
+        || rect.x + rect.width > w as f32 + 1.0
+        || rect.y + rect.height > h as f32 + 1.0
     {
+        println!("[class_skill_icon_sync] Rectangle non exploitable : {label_text}");
         return call_original!(skill, method);
     }
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let name = format!("{PREFIX}{id}");
-    if let Some((asset, handle)) = unsafe { build_asset(&name, &*label, sprite, texture, id) } {
+    if let Some((asset, handle)) = unsafe { build_asset(&name, &*label, sprite, texture, rect, id) } {
         assets().lock().unwrap().insert(label_text.clone(), (name.clone(), asset as usize, handle));
         println!("[class_skill_icon_sync] Icone TMP creee : {label_text}");
         return Il2CppString::new_static(format!("<sprite=\"{name}\" name=\"{label_text}\">")) as *const Il2CppString;
