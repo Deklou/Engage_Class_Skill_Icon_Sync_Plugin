@@ -20,7 +20,7 @@ struct SpriteGlyph {}
 #[unity::class("TMPro", "TMP_SpriteCharacter")]
 struct SpriteCharacter {}
 
-// La structure UnityEngine.Rect contient quatre flottants (x, y, largeur, hauteur).
+// UnityEngine.Rect (x, y, largeur, hauteur).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SpriteRect {
@@ -30,12 +30,9 @@ struct SpriteRect {
     height: f32,
 }
 
-// Offsets et structures du jeu 2.0.0 (Ghidra main_200).
+// Engage 2.0.0 (main_200).
 const PREFIX: &str = "ClassSkillIconSync_";
-// Ajustement vertical du sprite dans les messages TMP, en unités de glyph.
-// Une valeur positive descend l’icône sans déplacer le texte.
 const ICON_VERTICAL_DROP_PX: f32 = 6.0;
-// Décale l’image vers la gauche sans changer la place réservée entre les mots.
 const ICON_HORIZONTAL_SHIFT_PX: f32 = -4.0;
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static ASSETS: OnceLock<Mutex<HashMap<String, (String, usize, u32)>>> = OnceLock::new();
@@ -79,7 +76,7 @@ fn register_sprite_asset(hash: i32, asset: *mut SpriteAsset, method: OptionalMet
 #[skyline::from_offset(0x02E66750)]
 fn text_hash(name: *const Il2CppString, method: OptionalMethod) -> i32;
 
-// Les offsets de champs incluent l'en-tête IL2CPP de 0x10 octets.
+// Offsets absolus dans les objets IL2CPP (en-tête de 0x10 inclus).
 unsafe fn field<T: Copy>(ptr: *const u8, offset: usize) -> T {
     (ptr.add(offset) as *const T).read()
 }
@@ -106,7 +103,7 @@ unsafe fn build_asset(
     set_field(asset.cast(), 0x20, material as *mut Material);
     set_field(asset.cast(), 0xA8, texture);
 
-    // Réutilise la version et les métriques TMP d'origine.
+    // Reprend les métriques TMP de l'asset Skill.
     let version: *const Il2CppString = field(stock.cast(), 0x40);
     set_field(asset.cast(), 0x40, version);
     std::ptr::copy_nonoverlapping(stock.cast::<u8>().add(0x48), asset.cast::<u8>().add(0x48), 96);
@@ -115,8 +112,7 @@ unsafe fn build_asset(
     sprite_glyph_ctor(glyph, None);
     let p = (glyph as *mut SpriteGlyph).cast::<u8>();
     set_field(p, 0x10, 0_u32);
-    // Les coordonnées du rectangle sont exprimées dans la texture source :
-    // (0, 0, 56, 56) pour un PNG Cobalt, une sous-région pour un atlas vanilla.
+    // Sprite issu d'une texture indépendante ou d'un atlas.
     for (offset, value) in [
         (0x14, rect.width), (0x18, rect.height), (0x1C, ICON_HORIZONTAL_SHIFT_PX),
         (0x20, rect.height - ICON_VERTICAL_DROP_PX), (0x24, rect.width),
@@ -145,7 +141,7 @@ unsafe fn build_asset(
     (*char_list).add(character);
     update_lookup_tables(asset, None);
 
-    // Enregistre sous le véritable hash du nom attendu par TextMeshPro.
+    // Hash du nom attendu par TextMeshPro.
     let hash = text_hash(Il2CppString::new(name), None);
     register_sprite_asset(hash, asset, None);
     Some((asset, id))
@@ -153,17 +149,10 @@ unsafe fn build_asset(
 
 #[skyline::hook(offset = 0x025DA3D0)]
 fn create_skill_sprite_tag(skill: *const SkillData, method: OptionalMethod) -> *const Il2CppString {
-    if skill.is_null() {
-        println!("[class_skill_icon_sync] CreateSkillSpriteTag : skill nul");
-        return call_original!(skill, method);
-    }
+    if skill.is_null() { return call_original!(skill, method); }
     let label = unsafe { get_icon_label(skill, None) };
-    if label.is_null() {
-        println!("[class_skill_icon_sync] CreateSkillSpriteTag : IconLabel nul");
-        return call_original!(skill, method);
-    }
+    if label.is_null() { return call_original!(skill, method); }
     let label_text = unsafe { (*label).to_string() };
-    println!("[class_skill_icon_sync] CreateSkillSpriteTag : {label_text}");
     if label_text.is_empty() { return call_original!(skill, method); }
 
     if let Some((name, _, _)) = assets().lock().unwrap().get(&label_text) {
@@ -171,25 +160,13 @@ fn create_skill_sprite_tag(skill: *const SkillData, method: OptionalMethod) -> *
     }
 
     let sprite = unsafe { get_skill_icon(label, None) };
-    if sprite.is_null() {
-        println!("[class_skill_icon_sync] Sprite introuvable : {label_text}");
-        return call_original!(skill, method);
-    }
+    if sprite.is_null() { return call_original!(skill, method); }
     let texture = unsafe { sprite_texture(sprite, None) };
-    if texture.is_null() {
-        println!("[class_skill_icon_sync] Texture absente : {label_text}");
-        return call_original!(skill, method);
-    }
+    if texture.is_null() { return call_original!(skill, method); }
     let w = unsafe { texture_width(texture, None) };
     let h = unsafe { texture_height(texture, None) };
     let rect = unsafe { sprite_texture_rect(sprite, None) };
-    println!(
-        "[class_skill_icon_sync] Source {label_text} : texture {w}x{h}, rect ({}, {}, {}, {})",
-        rect.x, rect.y, rect.width, rect.height
-    );
-
-    // Un sprite vanilla peut venir d'un grand atlas. Le rectangle identifie
-    // uniquement ses pixels, sans copier ni modifier le sprite du jeu.
+    // Vérifie le rectangle avant de le transmettre au glyph TMP.
     if !rect.x.is_finite() || !rect.y.is_finite()
         || !rect.width.is_finite() || !rect.height.is_finite()
         || rect.x < 0.0 || rect.y < 0.0
@@ -205,7 +182,6 @@ fn create_skill_sprite_tag(skill: *const SkillData, method: OptionalMethod) -> *
     let name = format!("{PREFIX}{id}");
     if let Some((asset, handle)) = unsafe { build_asset(&name, &*label, sprite, texture, rect, id) } {
         assets().lock().unwrap().insert(label_text.clone(), (name.clone(), asset as usize, handle));
-        println!("[class_skill_icon_sync] Icone TMP creee : {label_text}");
         return Il2CppString::new_static(format!("<sprite=\"{name}\" name=\"{label_text}\">")) as *const Il2CppString;
     }
     println!("[class_skill_icon_sync] Ressource TMP indisponible pour {label_text}");
