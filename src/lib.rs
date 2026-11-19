@@ -57,9 +57,8 @@ fn update_lookup_tables(asset: *mut SpriteAsset, method: OptionalMethod);
 #[skyline::from_offset(0x025D5020)]
 fn original_asset_callback(arg: i32, asset_name: *const Il2CppString, method: OptionalMethod) -> *mut SpriteAsset;
 
-extern "C" {
-    fn il2cpp_gchandle_new(obj: *mut u8, pinned: bool) -> u32;
-}
+#[skyline::from_offset(0x02D8DAE0)]
+fn register_sprite_asset(hash: i32, asset: *mut SpriteAsset, method: OptionalMethod);
 
 // Les offsets de champs incluent l'en-tête IL2CPP de 0x10 octets.
 unsafe fn field<T: Copy>(ptr: *const u8, offset: usize) -> T {
@@ -69,7 +68,7 @@ unsafe fn set_field<T>(ptr: *mut u8, offset: usize, value: T) {
     (ptr.add(offset) as *mut T).write(value);
 }
 
-unsafe fn build_asset(name: &str, label: &Il2CppString, sprite: *mut Sprite, texture: *mut Texture)
+unsafe fn build_asset(name: &str, label: &Il2CppString, sprite: *mut Sprite, texture: *mut Texture, id: u32)
     -> Option<(*mut SpriteAsset, u32)> {
     let stock = original_asset_callback(0, Il2CppString::new("Skill"), None);
     if stock.is_null() { return None; }
@@ -115,9 +114,10 @@ unsafe fn build_asset(name: &str, label: &Il2CppString, sprite: *mut Sprite, tex
     (*char_list).add(character);
     update_lookup_tables(asset, None);
 
-    let handle = il2cpp_gchandle_new(asset.cast(), false);
-    if handle == 0 { return None; }
-    Some((asset, handle))
+    // Enregistrement natif : la collection TMP conserve l'asset et son matériau en mémoire.
+    let hash = 0x4000_0000_i32 + id as i32;
+    register_sprite_asset(hash, asset, None);
+    Some((asset, id))
 }
 
 #[skyline::hook(offset = 0x025DA3D0)]
@@ -143,8 +143,9 @@ fn create_skill_sprite_tag(skill: *const SkillData, method: OptionalMethod) -> *
         return call_original!(skill, method);
     }
 
-    let name = format!("{PREFIX}{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
-    if let Some((asset, handle)) = unsafe { build_asset(&name, &*label, sprite, texture) } {
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let name = format!("{PREFIX}{id}");
+    if let Some((asset, handle)) = unsafe { build_asset(&name, &*label, sprite, texture, id) } {
         assets().lock().unwrap().insert(label_text.clone(), (name.clone(), asset as usize, handle));
         println!("[class_skill_icon_sync] Icone TMP creee : {label_text}");
         return Il2CppString::new_static(format!("<sprite=\"{name}\" name=\"{label_text}\">")) as *const Il2CppString;
