@@ -35,6 +35,8 @@ const PREFIX: &str = "ClassSkillIconSync_";
 // Ajustement vertical du sprite dans les messages TMP, en unités de glyph.
 // Une valeur positive descend l’icône sans déplacer le texte.
 const ICON_VERTICAL_DROP_PX: f32 = 6.0;
+// Décale l’image vers la gauche sans changer la place réservée entre les mots.
+const ICON_HORIZONTAL_SHIFT_PX: f32 = -4.0;
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static ASSETS: OnceLock<Mutex<HashMap<String, (String, usize, u32)>>> = OnceLock::new();
 fn assets() -> &'static Mutex<HashMap<String, (String, usize, u32)>> {
@@ -116,7 +118,7 @@ unsafe fn build_asset(
     // Les coordonnées du rectangle sont exprimées dans la texture source :
     // (0, 0, 56, 56) pour un PNG Cobalt, une sous-région pour un atlas vanilla.
     for (offset, value) in [
-        (0x14, rect.width), (0x18, rect.height), (0x1C, 0.0),
+        (0x14, rect.width), (0x18, rect.height), (0x1C, ICON_HORIZONTAL_SHIFT_PX),
         (0x20, rect.height - ICON_VERTICAL_DROP_PX), (0x24, rect.width),
     ] {
         set_field(p, offset, value);
